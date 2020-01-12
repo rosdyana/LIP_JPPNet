@@ -6,7 +6,7 @@ import sys
 import time
 import scipy.misc
 import cv2
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 import tensorflow as tf
@@ -15,11 +15,63 @@ import matplotlib.pyplot as plt
 from utils import *
 from LIP_model import *
 
+import random
+from colorsys import rgb_to_hsv, hsv_to_rgb, hls_to_rgb, rgb_to_hls
+
+def h_dist(h1, h2):
+    """ distance between color hues in angular space,
+    where 1.0 == 0.0 (so distance must wrap around if > 1)"""
+    return min(abs(h1+1-h2), abs(h1-h2), abs(h1-1-h2))
+
+def rgb2hsv(t):
+    """ convert PIL-like RGB tuple (0 .. 255) to colorsys-like
+    HSL tuple (0.0 .. 1.0) """
+    r,g,b = t
+    r /= 255.0
+    g /= 255.0
+    b /= 255.0
+    return rgb_to_hsv(r,g,b)
+
+def hsv2rgb(t):
+    """ convert a colorsys-like HSL tuple (0.0 .. 1.0) to a
+    PIL-like RGB tuple (0 .. 255) """
+    r,g,b = hsv_to_rgb(*t)
+    r *= 255
+    g *= 255
+    b *= 255
+    return (int(r),int(g),int(b))
+
+def rgb2hls(t):
+    """ convert PIL-like RGB tuple (0 .. 255) to colorsys-like
+    HSL tuple (0.0 .. 1.0) """
+    r,g,b = t
+    r /= 255.0
+    g /= 255.0
+    b /= 255.0
+    return rgb_to_hls(r,g,b)
+
+def hls2rgb(t):
+    """ convert a colorsys-like HSL tuple (0.0 .. 1.0) to a
+    PIL-like RGB tuple (0 .. 255) """
+    r,g,b = hls_to_rgb(*t)
+    r *= 255
+    g *= 255
+    b *= 255
+    return (int(r),int(g),int(b))
+
+def reload_img(img):
+    sizew, sizeh = img.size
+    maxsize = ((sizew/2)**2 + (sizeh/2)**2)**0.5
+    imgdata = list(img.getdata())
+    return imgdata
+
 N_CLASSES = 20
 INPUT_SIZE = (384, 384)
-DATA_DIRECTORY = './datasets/examples'
-DATA_LIST_PATH = './datasets/examples/list/val.txt'
-NUM_STEPS = 6 # Number of images in the validation set.
+# DATA_DIRECTORY = './datasets/examples'
+# DATA_LIST_PATH = './datasets/examples/list/val.txt'
+DATA_DIRECTORY = './datasets/check_image'
+DATA_LIST_PATH = './datasets/check_image/list/val.txt'
+NUM_STEPS = 17 # Number of images in the validation set.
 RESTORE_FROM = './checkpoint/JPPNet-s2'
 OUTPUT_DIR = './output/parsing/val'
 if not os.path.exists(OUTPUT_DIR):
@@ -138,7 +190,7 @@ def main():
     # Start queue threads.
     threads = tf.train.start_queue_runners(coord=coord, sess=sess)
 
-
+    rand_int = [i/100 for i in random.sample(range(0, 100), NUM_STEPS)]
     # Iterate over training steps.
     for step in range(NUM_STEPS):
         parsing_ = sess.run(pred_all)
@@ -147,11 +199,52 @@ def main():
             print (image_list[step])
         img_split = image_list[step].split('/')
         img_id = img_split[-1][:-4]
+        mask_top = decode_labels(parsing_, [5,6,7,10], num_classes=N_CLASSES)
+        mask_bottom = decode_labels(parsing_, [9, 12], num_classes=N_CLASSES)
+        im_mask_top = Image.fromarray(mask_top[0]).convert('L')
+        im_mask_bottom = Image.fromarray(mask_bottom[0]).convert('L')
+        _mask_top = np.array(im_mask_top)
+        _mask_top[_mask_top != 0 ] = 255
+        _mask_bottom = np.array(im_mask_bottom)
+        _mask_bottom[_mask_bottom != 0 ] = 255
 
-        msk = decode_labels(parsing_, num_classes=N_CLASSES)
-        parsing_im = Image.fromarray(msk[0])
-        parsing_im.save('{}/{}_vis.png'.format(OUTPUT_DIR, img_id))
-        cv2.imwrite('{}/{}.png'.format(OUTPUT_DIR, img_id), parsing_[0,:,:,0])
+        real_img = Image.open(image_list[step]).convert("RGB")
+        top_real_img = Image.open(image_list[step]).convert("RGB")
+        bottom_real_img = Image.open(image_list[step]).convert("RGB")
+
+        imgdata_top = reload_img(top_real_img)
+        for i in range(0,len(imgdata_top)):
+            # hsv code start
+            (h,s,v) = rgb2hsv(imgdata_top[i])
+            h += float(i)/len(imgdata_top)
+            v += 0.005
+            imgdata_top[i] = hsv2rgb((h,s,v))
+            # hsv code end
+
+            # hls code
+            # (h,l,s) = rgb2hls(imgdata_top[i])
+            # h = rand_int[step]
+            # s = 0.3
+            # imgdata_top[i] = hls2rgb((h,l,s))
+            # hls code end
+        top_real_img.putdata(imgdata_top)
+        im = Image.composite(top_real_img, real_img, Image.fromarray(_mask_top).convert('L'))
+        if _mask_bottom.size > 0:
+            imgdata_bottom = reload_img(bottom_real_img)
+            for i in range(0,len(imgdata_bottom)):
+                # bottom part only use hsv to avoid not matching color with top parts
+                (h,s,v) = rgb2hsv(imgdata_bottom[i])
+                h += float(i)/len(imgdata_bottom)
+                v += 0.005
+                imgdata_bottom[i] = hsv2rgb((h,s,v))
+            bottom_real_img.putdata(imgdata_bottom)
+            im = Image.composite(bottom_real_img, im, Image.fromarray(_mask_bottom).convert('L'))
+            Image.fromarray(_mask_bottom).save('{}/{}_bottom.png'.format(OUTPUT_DIR, img_id))
+        im.save('{}/{}_hsl.png'.format(OUTPUT_DIR, img_id))
+        Image.fromarray(_mask_top).save('{}/{}_top.png'.format(OUTPUT_DIR, img_id))
+        
+        # parsing_im.save('{}/{}_vis.png'.format(OUTPUT_DIR, img_id))
+        # cv2.imwrite('{}/{}.png'.format(OUTPUT_DIR, img_id), parsing_[0,:,:,0])
 
     coord.request_stop()
     coord.join(threads)
